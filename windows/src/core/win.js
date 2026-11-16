@@ -7,7 +7,9 @@ const fs = require('fs');
 const P = require('./paths');
 const { exists, ls } = require('./util');
 
-const isWin = process.platform === 'win32';
+// With a test profile (ACCOUNTDECK_TEST_HOME) nothing real is touched: no environment variables,
+// no processes ended, no terminals or browsers opened.
+const isWin = process.platform === 'win32' && !P.testing;
 const log = (...a) => { if (process.env.ACCOUNTDECK_DEBUG) console.log('[win]', ...a); };
 
 /** Runs a PowerShell script (passed base64-encoded so quoting can't break it). */
