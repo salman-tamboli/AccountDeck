@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 concurrency:
   group: windows-${{ github.ref }}
@@ -27,16 +29,16 @@ jobs:
         working-directory: windows
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
-      - name: Install dependencies (lockfile only)
-        run: npm ci
+      - name: Install dependencies (lockfile only, no install scripts)
+        run: npm ci --ignore-scripts
 
       - name: All packages come from the official npm registry
         run: |
@@ -51,12 +53,40 @@ jobs:
           $hits = Get-ChildItem src -Recurse -Include *.js |
             Select-String -Pattern 'fetch\(|XMLHttpRequest|WebSocket|net\.request|require\(.(https?|net|dgram|tls).\)|eval\(|new Function'
           if ($hits) { $hits | ForEach-Object { "$($_.Path):$($_.LineNumber) $($_.Line.Trim())" }; throw 'Unexpected network or dynamic-code call in src' }
+          # Only win.js may start other programs.
+          $cp = Get-ChildItem src -Recurse -Include *.js | Select-String -Pattern 'child_process' | Where-Object { $_.Path -notlike '*\core\win.js' }
+          if ($cp) { $cp | ForEach-Object { "$($_.Path):$($_.LineNumber)" }; throw 'child_process used outside src/core/win.js' }
 
       - name: Logic tests
         run: npm test
 
       - name: Build installer (x64)
         run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Packed app matches the reviewed source
+        run: node tools/verify-asar.js dist/win-unpacked/resources/app.asar
+
+      - name: Runtime hardening switches are set
+        run: |
+          $r = npx --no-install electron-fuses read --app dist/win-unpacked/AccountDeck.exe | Out-String
+          $r
+          foreach ($want in 'RunAsNode is Disabled', 'EnableNodeOptionsEnvironmentVariable is Disabled', 'EnableNodeCliInspectArguments is Disabled', 'EnableEmbeddedAsarIntegrityValidation is Enabled', 'OnlyLoadAppFromAsar is Enabled') {
+            if ($r -notmatch [regex]::Escape($want)) { throw "Fuse not set: $want" }
+          }
+
+      - name: Antivirus scan (Microsoft Defender)
+        run: |
+          $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          if (-not (Test-Path $mp)) { throw 'Microsoft Defender is not available on this machine' }
+          & $mp -SignatureUpdate | Out-Null
+          $targets = @((Get-ChildItem dist -Filter 'AccountDeck-Setup-*.exe' | Select-Object -First 1).FullName, (Resolve-Path dist/win-unpacked).Path)
+          foreach ($t in $targets) {
+            & $mp -Scan -ScanType 3 -File $t -DisableRemediation
+            $code = $LASTEXITCODE
+            if ($code -eq 2) { throw "Defender found a threat in $t" }
+            if ($code -ne 0) { throw "Defender could not scan $t (exit code $code)" }
+            "Defender: no threats in $(Split-Path $t -Leaf)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
 
       - name: Silent install
         run: |
@@ -82,8 +112,22 @@ jobs:
           $env:ELECTRON_ENABLE_LOGGING = '1'
           $log = Join-Path $shots 'app.log'
           $p = Start-Process $env:APP_EXE -PassThru -RedirectStandardOutput $log -RedirectStandardError (Join-Path $shots 'app.err.log')
-          if (-not $p.WaitForExit(90000)) { $p.Kill(); Get-Content $log -ErrorAction SilentlyContinue; throw 'App did not finish within 90 s' }
+          # While the app runs, record every network connection any of its processes opens.
+          $remote = @{}
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not $p.HasExited) {
+            if ((Get-Date) -gt $deadline) { $p.Kill(); Get-Content $log -ErrorAction SilentlyContinue; throw 'App did not finish within 90 s' }
+            $ids = @(Get-Process -Name AccountDeck -ErrorAction SilentlyContinue | ForEach-Object Id)
+            if ($ids) {
+              Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.OwningProcess } |
+                Where-Object { $_.RemoteAddress -notin '127.0.0.1', '::1', '0.0.0.0', '::' } |
+                ForEach-Object { $remote["$($_.RemoteAddress):$($_.RemotePort)"] = $true }
+            }
+            Start-Sleep -Milliseconds 150
+          }
           Get-Content $log -ErrorAction SilentlyContinue
+          if ($remote.Count) { $remote.Keys; throw 'The app opened a network connection' }
+          'Network: the app opened no outside connections while running' | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $pngs = Get-ChildItem $shots -Filter '*.png'
           if ($pngs.Count -lt 3) { throw "Expected 3 page screenshots, got $($pngs.Count)" }
           $small = $pngs | Where-Object { $_.Length -lt 5000 }
@@ -105,8 +149,14 @@ jobs:
             "SHA-256 ``$h`` $($_.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
 
+      - name: Sign a build record (proves this file was built from this commit)
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: windows/dist/AccountDeck-Setup-*.exe
+
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: AccountDeck-windows-x64
           path: |
@@ -116,7 +166,7 @@ jobs:
 
       - name: Upload screenshots and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-screenshots
           path: ${{ runner.temp }}/shots

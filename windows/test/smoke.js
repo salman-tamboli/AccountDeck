@@ -6,6 +6,7 @@ process.env.ACCOUNTDECK_TEST_HOME = T;
 const w = (p, v) => { fs.mkdirSync(path.dirname(path.join(T, p)), { recursive: true }); fs.writeFileSync(path.join(T, p), typeof v === 'string' ? v : JSON.stringify(v)); };
 const r = p => JSON.parse(fs.readFileSync(path.join(T, p), 'utf8'));
 const now = Math.floor(Date.now() / 1000);
+const await0 = p => { if (p && p.catch) p.catch(() => {}); };
 
 // Claude Code main account
 w('.claude.json', { oauthAccount: { emailAddress: 'me@example.com', accountUuid: 'U1' }, mcpServers: { github: { command: 'npx', args: ['-y', '@x/github'], env: { TOKEN: 'secret' } } },
@@ -128,6 +129,23 @@ assert.ok(fs.existsSync(path.join(P.root, 'moved-chats/local_1.json')));
 // The hook script prints nothing (no Write-Output / Write-Host)
 assert.ok(!/Write-(Output|Host)/.test(SCRIPT));
 console.log('hook command:', hookCommand());
+
+// Terminal scripts: crafted names, folders and values can't add commands
+{
+  const W = require('../src/core/win');
+  const evil = path.join(T, 'x"\r\ncalc.exe');
+  const f = W.openTerminal({ title: 'a\r\ncalc & "b"', env: { CLAUDE_CONFIG_DIR: path.join(T, '100%') }, cwd: evil, commands: ['echo ' + W.echoSafe('n\r\ncalc & x')] });
+  const txt = fs.readFileSync(f, 'utf8'), ls = txt.split('\r\n').filter(Boolean);
+  assert.strictEqual(ls.length, 5, txt);                       // @echo, chcp, title, set, echo: no extra lines, no cd
+  assert.ok(!ls.some(l => /^calc/i.test(l.trim())));
+  assert.ok(txt.includes('100%%'));
+  assert.throws(() => W.openTerminal({ title: 't', env: { 'A&B': 'x' } }));
+  assert.throws(() => W.openTerminal({ title: 't', env: { A: 'x"\r\ncalc' } }));
+  assert.throws(() => W.openTerminal({ title: 't', commands: ['a\ncalc'] }));
+  assert.strictEqual(W.safeDir('relative\\dir'), false);
+  const odd = m.add('codex', 'Li\nne\u0000 two');
+  assert.ok(!/[\u0000-\u001f]/.test(odd.name)); await0(m.remove(odd.id, async () => {}));
+}
 
 // Rename / remove
 m.rename(work.id, 'Work');

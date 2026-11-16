@@ -44,6 +44,14 @@
       "createStartMenuShortcut": true,
       "runAfterFinish": true,
       "artifactName": "AccountDeck-Setup-${version}-${arch}.exe"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
     }
   },
   "devDependencies": {

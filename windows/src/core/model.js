@@ -30,6 +30,8 @@ const SERVICE_INFO = {
 // cookie database at Network\Cookies; older ones at the top level. Both are handled.
 // "Local State" (which holds the key that unlocks those files on this Windows account) is left
 // in place, so every saved login keeps working on this PC.
+/** Account names are one line of plain text, at most 60 characters. */
+const cleanName = n => String(n || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 60);
 const DESKTOP_FILES = ['Cookies', 'Cookies-journal', path.join('Network', 'Cookies'), path.join('Network', 'Cookies-journal'), 'config.json'];
 const COOKIE_FILES = ['Cookies', path.join('Network', 'Cookies')];
 
@@ -174,7 +176,7 @@ class AppModel extends EventEmitter {
   }
 
   add(service, name) {
-    const clean = String(name || '').trim();
+    const clean = cleanName(name);
     if (!clean || !SERVICES.includes(service)) return null;
     let slug = clean.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '-').replace(/^-+|-+$/g, '') || 'account';
     slug = slug.normalize('NFKD').replace(/[^\x20-\x7e]/g, '') || 'account';   // folder names stay plain ASCII
@@ -212,7 +214,7 @@ class AppModel extends EventEmitter {
   }
 
   rename(id, name) {
-    const v = String(name || '').trim(); const a = this.byId(id);
+    const v = cleanName(name); const a = this.byId(id);
     if (!v || !a) return; a.name = v; this.save(); this.changed();
   }
 

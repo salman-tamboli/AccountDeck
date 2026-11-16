@@ -134,10 +134,16 @@ function openTerminal({ title, env = {}, commands = [], cwd }) {
   const dir = path.join(P.root, 'run');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${Date.now().toString(36)}.cmd`);
-  const lines = ['@echo off', 'chcp 65001 >nul', `title ${String(title).replace(/[&|<>^%]/g, ' ')}`];
-  for (const [k, v] of Object.entries(env)) lines.push(v == null ? `set "${k}="` : `set "${k}=${String(v).replace(/%/g, '%%')}"`);
-  if (cwd && exists(cwd)) lines.push(`cd /d ${cmdq(cwd)}`);
-  lines.push(...commands);
+  // Everything written into the script is checked first, so a crafted account name, folder or
+  // chat file can never add a command of its own.
+  const lines = ['@echo off', 'chcp 65001 >nul', `title ${oneLine(title).replace(/[&|<>^%"]/g, ' ')}`];
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^[A-Z_][A-Z0-9_]*$/i.test(k)) throw new Error('Bad variable name');
+    if (v != null && UNSAFE_PATH.test(String(v))) throw new Error('Bad variable value');
+    lines.push(v == null ? `set "${k}="` : `set "${k}=${String(v).replace(/%/g, '%%')}"`);
+  }
+  if (cwd && safeDir(cwd)) lines.push(`cd /d ${cmdq(cwd).replace(/%/g, '%%')}`);
+  for (const c of commands) { if (/[\r\n\0]/.test(c)) throw new Error('Bad command'); lines.push(c); }
   fs.writeFileSync(file, lines.join('\r\n') + '\r\n', 'utf8');
   log('terminal script:', file, '\n' + lines.join('\n'));
   if (!isWin) return file;
@@ -148,11 +154,16 @@ function cleanRunScripts() {
   const dir = path.join(P.root, 'run');
   for (const f of ls(dir)) { const p = path.join(dir, f); try { if (Date.now() - fs.statSync(p).mtimeMs > 86400000) fs.unlinkSync(p); } catch {} }
 }
+/** Characters that must never reach a batch file inside a path or value. */
+const UNSAFE_PATH = /[\r\n\0"]/;
+/** A folder that exists, is absolute and has no character cmd.exe would act on. */
+const safeDir = d => typeof d === 'string' && path.isAbsolute(d) && !UNSAFE_PATH.test(d) && exists(d);
+const oneLine = s => String(s).replace(/[\r\n\0]+/g, ' ');
 /** Quotes a value for cmd.exe. */
 const cmdq = s => '"' + String(s).replace(/"/g, '') + '"';
 /** Escapes text for `echo` in a batch file. */
-const echoSafe = s => String(s).replace(/[\^&|<>%"]/g, c => (c === '%' ? '%%' : c === '"' ? "'" : '^' + c));
+const echoSafe = s => oneLine(s).replace(/[\^&|<>%"]/g, c => (c === '%' ? '%%' : c === '"' ? "'" : '^' + c));
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { isWin, ps, setUserEnv, getUserEnv, quitDesktop, launchDesktop, desktopRunning, desktopExePath, findBrowser, openChatGPT, openTerminal, cleanRunScripts, cmdq, echoSafe, sleep };
+module.exports = { isWin, ps, setUserEnv, getUserEnv, quitDesktop, launchDesktop, desktopRunning, desktopExePath, findBrowser, openChatGPT, openTerminal, cleanRunScripts, cmdq, echoSafe, safeDir, sleep };
