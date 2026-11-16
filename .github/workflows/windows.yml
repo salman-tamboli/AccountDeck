@@ -1,0 +1,123 @@
+name: Windows build and test
+
+# Builds the Windows installer from source on a real Windows machine, tests it, and
+# uploads the installer with its SHA-256 checksum.
+
+on:
+  push:
+    branches: [main, windows-ci]
+    paths: ['windows/**', '.github/workflows/windows.yml']
+  pull_request:
+    paths: ['windows/**', '.github/workflows/windows.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: windows
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (lockfile only)
+        run: npm ci
+
+      - name: All packages come from the official npm registry
+        run: |
+          $bad = Select-String -Path package-lock.json -Pattern '"resolved": "(?!https://registry\.npmjs\.org/)'
+          if ($bad) { $bad | ForEach-Object { $_.Line }; throw 'A package is not from registry.npmjs.org' }
+
+      - name: Vulnerability audit (fails on high or critical)
+        run: npm audit --audit-level=high
+
+      - name: Source has no network or dynamic-code calls
+        run: |
+          $hits = Get-ChildItem src -Recurse -Include *.js |
+            Select-String -Pattern 'fetch\(|XMLHttpRequest|WebSocket|net\.request|require\(.(https?|net|dgram|tls).\)|eval\(|new Function'
+          if ($hits) { $hits | ForEach-Object { "$($_.Path):$($_.LineNumber) $($_.Line.Trim())" }; throw 'Unexpected network or dynamic-code call in src' }
+
+      - name: Logic tests
+        run: npm test
+
+      - name: Build installer (x64)
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Silent install
+        run: |
+          $exe = Get-ChildItem dist -Filter 'AccountDeck-Setup-*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'No installer was built' }
+          $dir = Join-Path $env:RUNNER_TEMP 'AccountDeckInstall'
+          $p = Start-Process $exe.FullName -ArgumentList '/S', "/D=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exit code $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $dir 'AccountDeck.exe'))) { throw 'AccountDeck.exe missing after install' }
+          "APP_EXE=$(Join-Path $dir 'AccountDeck.exe')" | Out-File $env:GITHUB_ENV -Append
+          "APP_DIR=$dir" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Launch the installed app against a fake profile
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP 'deck-home'
+          node test/fake-home.js $fake
+          $shots = Join-Path $env:RUNNER_TEMP 'shots'
+          New-Item -ItemType Directory -Force $shots | Out-Null
+          $env:ACCOUNTDECK_TEST_HOME = $fake
+          $env:ACCOUNTDECK_DEBUG = '1'
+          $env:ACCOUNTDECK_SHOT = Join-Path $shots 'page.png'
+          $env:ACCOUNTDECK_SHOT_PAGES = 'home,mcp,settings'
+          $env:ELECTRON_ENABLE_LOGGING = '1'
+          $log = Join-Path $shots 'app.log'
+          $p = Start-Process $env:APP_EXE -PassThru -RedirectStandardOutput $log -RedirectStandardError (Join-Path $shots 'app.err.log')
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); Get-Content $log -ErrorAction SilentlyContinue; throw 'App did not finish within 90 s' }
+          Get-Content $log -ErrorAction SilentlyContinue
+          $pngs = Get-ChildItem $shots -Filter '*.png'
+          if ($pngs.Count -lt 3) { throw "Expected 3 page screenshots, got $($pngs.Count)" }
+          $small = $pngs | Where-Object { $_.Length -lt 5000 }
+          if ($small) { throw 'A page rendered blank' }
+
+      - name: Silent uninstall
+        run: |
+          $un = Get-ChildItem $env:APP_DIR -Filter 'Uninstall*.exe' | Select-Object -First 1
+          if (-not $un) { throw 'Uninstaller missing' }
+          Start-Process $un.FullName -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 5
+          if (Test-Path $env:APP_EXE) { throw 'App still present after uninstall' }
+
+      - name: Checksum
+        run: |
+          Get-ChildItem dist -Filter 'AccountDeck-Setup-*.exe' | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)" | Tee-Object -FilePath dist/SHA256SUMS.txt -Append
+            "SHA-256 ``$h`` $($_.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AccountDeck-windows-x64
+          path: |
+            windows/dist/AccountDeck-Setup-*.exe
+            windows/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-screenshots
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: ignore
