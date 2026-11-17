@@ -154,9 +154,30 @@ function notify(text) {
 // Usage changes when Claude Code's status line hook or Codex writes a file. Those folders are
 // watched, so the menu and Dashboard update within about a second instead of on a timer.
 let watchers = [], watchTimer = null, watchKey = '';
+// Claude and Codex write to these folders many times a second while they are open. A file event
+// only re-reads usage (at most once every 5 seconds), and the Dashboard is only told when a
+// number actually changed, so it never redraws for nothing.
+let lastUsageRead = 0, lastUsageSig = '';
+function usageSig() {
+  const o = {};
+  for (const [id, x] of Object.entries(usage.usage)) {
+    o[id] = [Math.round(x.percent * 10), x.resetsAt || 0, x.window, x.second ? Math.round(x.second.percent * 10) : -1, x.second ? x.second.resetsAt || 0 : 0, !!x.estimated];
+  }
+  return JSON.stringify([o, usage.claudeTracking]);
+}
+/** Re-reads usage; pushes to the Dashboard and tray only when it changed. Returns whether it did. */
+function refreshUsage() {
+  lastUsageRead = Date.now();
+  if (!usage.refresh(true)) return false;
+  const sig = usageSig();
+  if (sig === lastUsageSig) return false;
+  lastUsageSig = sig; push(); refreshTray();
+  return true;
+}
 function onUsageFile() {
-  clearTimeout(watchTimer);
-  watchTimer = setTimeout(() => { if (usage.refresh(true)) { push(); refreshTray(); } }, 700);
+  if (watchTimer) return;                                            // one read is already queued
+  const wait = Math.max(700, 5000 - (Date.now() - lastUsageRead));
+  watchTimer = setTimeout(() => { watchTimer = null; refreshUsage(); }, wait);
 }
 function watchUsage() {
   const fs = require('fs'), P = require('./core/paths');
@@ -248,7 +269,7 @@ function setupIPC() {
 app.whenReady().then(async () => {
   model = new AppModel();
   usage = new UsageStore(model);
-  usage.refresh(true);
+  usage.refresh(true); lastUsageSig = usageSig(); lastUsageRead = Date.now();
   W.cleanRunScripts();
   model.on('changed', () => { push(); refreshTray(); watchUsage(); });
   model.on('toast', notify);
@@ -270,7 +291,9 @@ app.whenReady().then(async () => {
     tick++;
     watchUsage();
     const visible = win && !win.isDestroyed() && win.isVisible();
-    if ((visible || tick % 4 === 0) && usage.refresh(true)) { push(); refreshTray(); }
+    if (visible || tick % 4 === 0) refreshUsage();
+    // Countdown texts ("resets in 2h 14m") move on once a minute even when no number changed.
+    if (visible && tick % 4 === 0) push();
   }, 15000);
   setInterval(() => model.refresh(), 5 * 60000);
 

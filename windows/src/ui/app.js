@@ -79,14 +79,27 @@ function renderNav() {
   $('#nav').innerHTML = out;
 }
 
-function render() {
+/**
+ * Draws the current page. A soft render (live updates, timers) leaves the page alone when the
+ * new content is identical to what is already shown, so background updates never flicker.
+ */
+let shown = { page: null, html: '' };
+function render(soft = false) {
   if (!S) return;
-  renderNav();
   const main = $('#main');
-  if (page.startsWith('account:')) { const a = acc(page.slice(8)); if (!a) { page = 'home'; return render(); } main.innerHTML = accountPage(a); loadAccount(a); }
-  else if (page === 'mcp') { main.innerHTML = mcpPage(); loadMcp(); }
-  else if (page === 'settings') main.innerHTML = settingsPage();
-  else { main.innerHTML = homePage(); loadStats(); }
+  let html, after = null;
+  if (page.startsWith('account:')) { const a = acc(page.slice(8)); if (!a) { page = 'home'; return render(soft); } html = accountPage(a); after = () => loadAccount(a); }
+  else if (page === 'mcp') { html = mcpPage(); after = loadMcp; }
+  else if (page === 'settings') html = settingsPage();
+  else { html = homePage(); after = loadStats; }
+  html = String(html);
+  if (soft && shown.page === page && shown.html === html) return;
+  shown = { page, html };
+  renderNav();
+  const scroll = main.scrollTop;
+  main.innerHTML = html;
+  if (soft) main.scrollTop = scroll;
+  if (after) after();
 }
 
 // ------------------------------------------------------------------ pieces
@@ -395,9 +408,9 @@ deck.on('state', s => {
   S = s;
   // Re-render unless the user is in the middle of picking things on a page.
   const after = JSON.stringify(S.accounts.map(a => [a.id, a.active, a.name, a.detail]));
-  if (before !== after) return render();
-  if (picked.size || !$('#modal').hidden) return;
-  if (page === 'home') render();
+  if (picked.size || !$('#modal').hidden) { if (before !== after) renderNav(); return; }
+  if (before !== after) return render(true);
+  if (page === 'home') render(true);
   else if (page.startsWith('account:')) updateLimitStrip();
 });
 deck.on('toast', toast);
@@ -419,5 +432,5 @@ async function loadStats() { cache.stats = await run(deck.stats()) || cache.stat
   const hash = decodeURIComponent(location.hash.slice(1));
   if (hash.startsWith('add:')) { page = 'home'; render(); addDialog(hash.slice(4)); }
   else { page = hash && (hash === 'mcp' || hash === 'settings' || hash.startsWith('account:')) ? hash : 'home'; render(); }
-  setInterval(() => { if (picked.size || !$('#modal').hidden) return; if (page === 'home') render(); else if (page.startsWith('account:')) updateLimitStrip(); }, 30000);   // countdowns
+  setInterval(() => { if (picked.size || !$('#modal').hidden) return; if (page === 'home') render(true); else if (page.startsWith('account:')) updateLimitStrip(); }, 30000);   // countdowns
 })();

@@ -1,7 +1,7 @@
 {
   "name": "accountdeck",
   "productName": "AccountDeck",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Switch between Claude Desktop, Claude Code, Codex and ChatGPT accounts on one Windows PC.",
   "author": "Nadim Sheikh",
   "license": "MIT",
