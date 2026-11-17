@@ -18,7 +18,9 @@ const root = path.join(home, '.accountdeck');
  *  • Microsoft Store / WinGet / MSIX installer: Windows redirects the app's %APPDATA% writes to
  *    %LOCALAPPDATA%\Packages\Claude_<publisher id>\LocalCache\Roaming\Claude
  *    (publisher id reported as "pzs8sxrjxfjjc"; matched with a wildcard here, not assumed).
- * When both exist, the one whose config.json changed most recently is the one Claude is using.
+ *  • Newer Store builds: %LOCALAPPDATA%\Claude-Data\claude_<publisher id>
+ * When several exist, the one whose config.json or cookies changed most recently is the one
+ * Claude is using. Old, empty folders from earlier versions are left behind by Claude's updates.
  */
 function desktopCandidates() {
   const out = [];
@@ -29,6 +31,12 @@ function desktopCandidates() {
       const p = path.join(pkgRoot, name, ...sub);
       if (isDir(p)) out.push({ dir: p, kind: 'msix', pkg: name });
     }
+  }
+  // Newer Store builds (seen on Claude 5.x) keep everything in %LOCALAPPDATA%\Claude-Data\<package name>.
+  const dataRoot = path.join(localAppData, 'Claude-Data');
+  for (const name of ls(dataRoot)) {
+    const p = path.join(dataRoot, name);
+    if (isDir(p)) out.push({ dir: p, kind: 'msix', pkg: name });
   }
   const direct = path.join(appData, 'Claude');
   if (isDir(direct)) out.push({ dir: direct, kind: 'direct' });
@@ -43,7 +51,8 @@ function desktopSupport() {
 }
 function desktopInstallKind() {
   const sup = desktopSupport();
-  return sup.includes(`${path.sep}Packages${path.sep}`) ? 'msix' : 'direct';
+  const c = desktopCandidates().find(x => x.dir === sup);
+  return c ? c.kind : 'direct';
 }
 
 const claudeHome = path.join(home, '.claude');

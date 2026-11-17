@@ -27,6 +27,10 @@ w('AppData/Roaming/Claude/Network/Cookies', 'cookieA');
 w('AppData/Roaming/Claude/claude_desktop_config.json', { mcpServers: { files: { command: 'C:\\tools\\files.exe' } } });
 w('AppData/Roaming/Claude/claude-code-sessions/U1/org1/local_1.json', { title: 'Desktop chat', cliSessionId: 'sessD', lastFocusedAt: 5, cwd: 'C:\\code\\app' });
 w('AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/x.txt', 'x');
+// Newer Store build: data in Claude-Data\claude_<id>. Older than the direct install here.
+w('AppData/Local/Claude-Data/claude_pzs8sxrjxfjjc/config.json', { lastKnownAccountUuid: 'U9' });
+w('AppData/Local/Claude-Data/claude_pzs8sxrjxfjjc/Network/Cookies', 'cookie9');
+for (const f of ['config.json', 'Network/Cookies']) fs.utimesSync(path.join(T, 'AppData/Local/Claude-Data/claude_pzs8sxrjxfjjc', f), new Date(2020, 0, 1), new Date(2020, 0, 1));
 
 const P = require('../src/core/paths');
 const { AppModel } = require('../src/core/model');
@@ -34,7 +38,15 @@ const { UsageStore, viewUsage, badgeText, SCRIPT, hookCommand } = require('../sr
 const D = require('../src/core/data');
 
 assert.ok(P.desktopSupport().endsWith(path.join('Roaming', 'Claude')), 'direct install wins when it has the newer config: ' + P.desktopSupport());
-assert.strictEqual(P.desktopCandidates().length, 2);
+assert.strictEqual(P.desktopCandidates().length, 3);
+{
+  // The folder Claude wrote to last is the one in use, and an empty leftover folder never wins.
+  const nd = path.join(T, 'AppData/Local/Claude-Data/claude_pzs8sxrjxfjjc'), soon = new Date(Date.now() + 60000);
+  fs.utimesSync(path.join(nd, 'Network/Cookies'), soon, soon);
+  assert.strictEqual(P.desktopSupport(), nd); assert.strictEqual(P.desktopInstallKind(), 'msix');
+  fs.utimesSync(path.join(nd, 'Network/Cookies'), new Date(2020, 0, 1), new Date(2020, 0, 1));
+  assert.strictEqual(P.desktopInstallKind(), 'direct');
+}
 
 const m = new AppModel();
 const byS = s => m.accountsFor(s);
@@ -104,7 +116,23 @@ const sup = P.desktopSupport();
 const main = m.byId('desktop-default');
 const second = { id: 'desktop-two', service: 'desktop', name: 'Two', isDefault: false, dir: path.join(P.root, 'desktop', 'desktop-two') };
 m.accounts.push(second);
+{
+  // A folder without Claude's files is refused, and nothing is created or marked.
+  const empty = path.join(T, 'AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude');
+  assert.throws(() => m.swapDesktopFiles(main, second, empty), /not found/);
+  assert.ok(!fs.existsSync(path.join(P.root, 'desktop/_original-backup')));
+  // State left by the earlier bug (empty safety copy, new account marked active) is undone.
+  fs.mkdirSync(path.join(P.root, 'desktop/_original-backup'), { recursive: true });
+  m.active.desktop = second.id;
+  assert.strictEqual(m.repairDesktopState(), true);
+  assert.strictEqual(m.active.desktop, main.id); assert.ok(!fs.existsSync(path.join(P.root, 'desktop/_original-backup')));
+  assert.strictEqual(m.repairDesktopState(), false);
+}
+w('AppData/Roaming/Claude/Partitions/p1/Network/Cookies', 'partA');
 m.swapDesktopFiles(main, second, sup);
+assert.strictEqual(fs.readFileSync(path.join(main.dir, 'Partitions/p1/Network/Cookies'), 'utf8'), 'partA');
+assert.ok(!fs.existsSync(path.join(sup, 'Partitions/p1/Network/Cookies')));
+assert.ok(fs.existsSync(path.join(P.root, 'desktop/_original-backup/Partitions/p1/Network/Cookies')));
 assert.ok(fs.existsSync(path.join(P.root, 'desktop/_original-backup/Network/Cookies')));
 assert.strictEqual(fs.readFileSync(path.join(main.dir, 'Network/Cookies'), 'utf8'), 'cookieA');
 assert.ok(!fs.existsSync(path.join(sup, 'Network/Cookies')));
@@ -118,6 +146,8 @@ m.swapDesktopFiles(second, main, sup);
 assert.strictEqual(fs.readFileSync(path.join(sup, 'Network/Cookies'), 'utf8'), 'cookieA');
 assert.strictEqual(r('AppData/Roaming/Claude/config.json').lastKnownAccountUuid, 'U1');
 assert.strictEqual(fs.readFileSync(path.join(second.dir, 'Network/Cookies'), 'utf8'), 'cookieB');
+assert.strictEqual(fs.readFileSync(path.join(sup, 'Partitions/p1/Network/Cookies'), 'utf8'), 'partA');
+assert.strictEqual(m.repairDesktopState(), false);
 
 // Carry last chat between Desktop accounts
 fs.mkdirSync(path.join(sup, 'claude-code-sessions/U2/orgB'), { recursive: true });

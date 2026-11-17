@@ -39,7 +39,7 @@ const DEFAULT_SETTINGS = {
   order: SERVICES.slice(),
   hidden: [],
   limit: 'auto',          // "auto", "5h" or "weekly"
-  carryChat: true,        // bring the last Code-tab chat along on a Claude Desktop switch
+  carryChat: false,       // bring the last Code-tab chat along on a Claude Desktop switch (off unless chosen)
   usageOnRows: true,
 };
 
@@ -55,6 +55,7 @@ class AppModel extends EventEmitter {
     U.mkdirp(P.root);
     this.load();
     this.ensureDefaults();
+    this.repairDesktopState();
     this.save();
     this.refresh();
   }
@@ -266,6 +267,11 @@ class AppModel extends EventEmitter {
     }
     if (!confirmed) { this.emit('confirm', { kind: 'desktop', id: a.id, title: `Switch Claude to "${a.name}"?`, message: this.desktopConfirmText(a), button: 'Restart Claude' }); return; }
 
+    // Check before closing anything: if Claude's login files can't be found, leave Claude alone.
+    if (!this.desktopHasLoginFiles(P.desktopSupport())) {
+      this.flash(`Claude's login files were not found in ${P.short(P.desktopSupport())}. Nothing was changed.`);
+      return;
+    }
     const current = this.byId(this.active.desktop);
     this.switching = true; this.changed();
     this.flash('Closing Claude…');
@@ -294,32 +300,68 @@ class AppModel extends EventEmitter {
     }
   }
 
+  /** True when a folder holds Claude Desktop login files (cookies or its config.json). */
+  desktopHasLoginFiles(dir) { return DESKTOP_FILES.some(f => U.exists(path.join(dir, f))); }
+
+  /**
+   * The login files to move: the main ones plus the cookie files of every extra browser
+   * partition Claude uses (Partitions\<name>), found in any of the given folders. Without those,
+   * a part of Claude could stay signed in to the previous account.
+   */
+  desktopFileList(...dirs) {
+    const out = new Set(DESKTOP_FILES);
+    for (const d of dirs) for (const part of U.ls(path.join(d, 'Partitions'))) {
+      for (const f of ['Cookies', 'Cookies-journal', path.join('Network', 'Cookies'), path.join('Network', 'Cookies-journal')]) {
+        const rel = path.join('Partitions', part, f);
+        if (U.exists(path.join(d, rel))) out.add(rel);
+      }
+    }
+    return [...out];
+  }
+
+  /**
+   * An earlier version could "switch" against a folder Claude no longer uses: nothing was moved,
+   * but the new account was marked active. That leaves an empty safety copy behind. Undo it, so
+   * the login that is really in Claude is treated as the Main account again.
+   */
+  repairDesktopState(base = P.root) {
+    const backup = path.join(base, 'desktop', '_original-backup');
+    if (!U.exists(backup) || this.desktopHasLoginFiles(backup)) return false;
+    if (this.accounts.some(a => a.service === 'desktop' && this.desktopHasLoginFiles(a.dir))) return false;
+    fs.rmSync(backup, { recursive: true, force: true });
+    const main = this.accounts.find(a => a.service === 'desktop' && a.isDefault);
+    if (main) this.active.desktop = main.id;
+    return true;
+  }
+
   swapDesktopFiles(current, target, sup = P.desktopSupport(), base = P.root) {
     const copy = (from, to) => { U.mkdirp(path.dirname(to)); fs.copyFileSync(from, to); };
     const rm = p => { try { fs.unlinkSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
+    // Never act on a folder that isn't Claude's: without its files nothing here is a login.
+    if (!this.desktopHasLoginFiles(sup)) throw new Error(`Claude's login files were not found in ${P.short(sup)}. Nothing was changed.`);
     // One-time safety copy of the login you had before AccountDeck ever switched.
     const backup = path.join(base, 'desktop', '_original-backup');
-    if (!U.exists(backup)) {
+    if (!this.desktopHasLoginFiles(backup)) {
       U.mkdirp(backup);
-      for (const f of DESKTOP_FILES) if (U.exists(path.join(sup, f))) copy(path.join(sup, f), path.join(backup, f));
+      for (const f of this.desktopFileList(sup)) if (U.exists(path.join(sup, f))) copy(path.join(sup, f), path.join(backup, f));
     }
     // Save the login that is in Claude right now.
     if (current) {
       U.mkdirp(current.dir);
-      for (const f of DESKTOP_FILES) {
+      for (const f of this.desktopFileList(sup, current.dir)) {
         rm(path.join(current.dir, f));
         if (U.exists(path.join(sup, f))) copy(path.join(sup, f), path.join(current.dir, f));
       }
     }
     // Put the chosen account's login in place.
     if (this.desktopSlotHasLogin(target)) {
-      for (const f of DESKTOP_FILES) {
+      for (const f of this.desktopFileList(sup, target.dir)) {
         rm(path.join(sup, f));
         if (U.exists(path.join(target.dir, f))) copy(path.join(target.dir, f), path.join(sup, f));
       }
     } else {
       // New account: sign out but keep the app's settings.
-      for (const f of DESKTOP_FILES) if (f !== 'config.json') rm(path.join(sup, f));
+      for (const f of this.desktopFileList(sup)) if (f !== 'config.json') rm(path.join(sup, f));
       const cfgPath = path.join(sup, 'config.json');
       const cfg = U.readJSON(cfgPath);
       if (cfg) {
